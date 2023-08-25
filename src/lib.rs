@@ -47,7 +47,7 @@ impl Concatenator {
 
                 // Add line numbers if configured, if we're at the start of a line
                 if buf_read_state == StartOfLine && self.add_line_numbers {
-                    write!(output_stream, "{line_count}\t")?;
+                    write!(output_stream, "     {line_count}\t")?;
                     line_count += 1;
                 }
 
@@ -73,9 +73,9 @@ impl Concatenator {
                 }
 
                 input.consume(bytes_written);
+                output_stream.flush()?;
             }
         }
-        output_stream.flush()?;
         Ok(())
     }
 }
