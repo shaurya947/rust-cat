@@ -35,7 +35,8 @@ struct Args {
 //
 // The CLI interface has been separated into a binary crate while most of
 // the input/output processing happens in a library crate. This makes the
-// the IO processing more testable. We use buffers to handle large files well.
+// the IO processing more testable. There are some unit tests in lib.rs.
+// We use buffers to handle large files well.
 fn main() -> std::io::Result<()> {
     let args = Args::parse();
 

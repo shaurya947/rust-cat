@@ -60,8 +60,8 @@ impl Concatenator {
             .map(InputSource::get_buf_read)
             .collect();
 
-        let out = BufWriter::new(io::stdout());
-        cat(ins, out, self.add_line_numbers, self.add_line_endings)
+        let mut out = BufWriter::new(io::stdout());
+        cat(ins, &mut out, self.add_line_numbers, self.add_line_endings)
     }
 }
 
@@ -73,7 +73,7 @@ enum BufReadState {
 
 fn cat<R, W>(
     ins: Vec<Result<R, Box<dyn Error>>>,
-    mut out: W,
+    out: &mut W,
     line_nums: bool,
     line_ends: bool,
 ) -> io::Result<()>
@@ -84,15 +84,17 @@ where
     use BufReadState::*;
 
     let mut line_count = 1;
+    let mut buf_read_state = StartOfLine;
+
     'outer: for input in ins {
         if let Err(e) = input {
             writeln!(out, "cat: {e}")?;
             out.flush()?;
+            buf_read_state = StartOfLine;
             continue 'outer;
         }
-        let mut input = input.unwrap();
 
-        let mut buf_read_state = StartOfLine;
+        let mut input = input.unwrap();
         'inner: loop {
             let input_buffer = input.fill_buf()?;
 
@@ -128,10 +130,6 @@ where
                 writeln!(out)?;
                 bytes_written += 1;
             } else {
-                /*
-                It's ok to set buf_read_state to MiddleOfLine even if we hit
-                EOF because once we hit EOF the inner loop breaks anyway.
-                */
                 buf_read_state = MiddleOfLine;
             }
 
@@ -140,4 +138,376 @@ where
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod cat_tests {
+    use std::{
+        io::{self, Cursor},
+        str,
+    };
+
+    use crate::{POST_LINE_NUM_INDENT, PRE_LINE_NUM_INDENT};
+
+    use super::cat;
+
+    const INPUT_STREAM_1: &str = "This is the first file...
+Second line of first file now
+Not ending with a new line";
+    const INPUT_STREAM_2: &str = "This is the second file...
+Second line of second file now
+Going to end with a new line
+";
+    const INPUT_STREAM_3: &str = "This is the third file...
+Second line of third file now
+Not ending with a new line";
+
+    const ERROR_1: &str = "Oops, something went wrong!";
+
+    #[test]
+    fn no_ins_no_out() -> io::Result<()> {
+        let ins = vec![Ok(Cursor::new(String::new()))];
+        let mut out = Vec::<u8>::default();
+        cat(ins, &mut out, false, false)?;
+
+        assert_eq!(out.len(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn one_in_correct_out() -> io::Result<()> {
+        let ins = vec![Ok(Cursor::new(INPUT_STREAM_1))];
+        let mut out = Vec::<u8>::default();
+        cat(ins, &mut out, false, false)?;
+
+        assert_eq!(str::from_utf8(&out).unwrap(), INPUT_STREAM_1);
+        Ok(())
+    }
+
+    #[test]
+    fn one_in_error_correct_out() -> io::Result<()> {
+        let ins: Vec<Result<Cursor<Vec<u8>>, _>> = vec![Err(ERROR_1.into())];
+        let mut out = Vec::<u8>::default();
+        cat(ins, &mut out, false, false)?;
+
+        assert_eq!(str::from_utf8(&out).unwrap(), format!("cat: {ERROR_1}\n"));
+        Ok(())
+    }
+
+    #[test]
+    fn multiple_ins_correct_out() -> io::Result<()> {
+        let ins = vec![
+            Ok(Cursor::new(INPUT_STREAM_1)),
+            Ok(Cursor::new(INPUT_STREAM_2)),
+            Ok(Cursor::new(INPUT_STREAM_3)),
+        ];
+        let mut out = Vec::<u8>::default();
+        cat(ins, &mut out, false, false)?;
+
+        assert_eq!(
+            str::from_utf8(&out).unwrap(),
+            format!("{INPUT_STREAM_1}{INPUT_STREAM_2}{INPUT_STREAM_3}")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn multiple_ins_with_error_correct_out() -> io::Result<()> {
+        let ins = vec![
+            Ok(Cursor::new(INPUT_STREAM_1)),
+            Err(ERROR_1.into()),
+            Ok(Cursor::new(INPUT_STREAM_2)),
+            Ok(Cursor::new(INPUT_STREAM_3)),
+        ];
+        let mut out = Vec::<u8>::default();
+        cat(ins, &mut out, false, false)?;
+
+        assert_eq!(
+            str::from_utf8(&out).unwrap(),
+            format!("{INPUT_STREAM_1}cat: {ERROR_1}\n{INPUT_STREAM_2}{INPUT_STREAM_3}")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn line_nums_correct_out() -> io::Result<()> {
+        let ins = vec![
+            Ok(Cursor::new(INPUT_STREAM_1)),
+            Ok(Cursor::new(INPUT_STREAM_2)),
+            Ok(Cursor::new(INPUT_STREAM_3)),
+        ];
+        let mut out = Vec::<u8>::default();
+        cat(ins, &mut out, true, false)?;
+
+        let (lines_1, lines_2, lines_3) = (
+            INPUT_STREAM_1.lines().collect::<Vec<_>>(),
+            INPUT_STREAM_2.lines().collect::<Vec<_>>(),
+            INPUT_STREAM_3.lines().collect::<Vec<_>>(),
+        );
+
+        let expected_out = vec![
+            format!(
+                "{PRE_LINE_NUM_INDENT}1{POST_LINE_NUM_INDENT}{}\n",
+                lines_1[0]
+            ),
+            format!(
+                "{PRE_LINE_NUM_INDENT}2{POST_LINE_NUM_INDENT}{}\n",
+                lines_1[1]
+            ),
+            format!(
+                "{PRE_LINE_NUM_INDENT}3{POST_LINE_NUM_INDENT}{}{}\n",
+                lines_1[2], lines_2[0]
+            ),
+            format!(
+                "{PRE_LINE_NUM_INDENT}4{POST_LINE_NUM_INDENT}{}\n",
+                lines_2[1]
+            ),
+            format!(
+                "{PRE_LINE_NUM_INDENT}5{POST_LINE_NUM_INDENT}{}\n",
+                lines_2[2]
+            ),
+            format!(
+                "{PRE_LINE_NUM_INDENT}6{POST_LINE_NUM_INDENT}{}\n",
+                lines_3[0]
+            ),
+            format!(
+                "{PRE_LINE_NUM_INDENT}7{POST_LINE_NUM_INDENT}{}\n",
+                lines_3[1]
+            ),
+            format!("{PRE_LINE_NUM_INDENT}8{POST_LINE_NUM_INDENT}{}", lines_3[2]),
+        ];
+
+        assert_eq!(str::from_utf8(&out).unwrap(), expected_out.join(""));
+        Ok(())
+    }
+
+    #[test]
+    fn line_nums_with_error_correct_out() -> io::Result<()> {
+        let ins = vec![
+            Ok(Cursor::new(INPUT_STREAM_1)),
+            Err(ERROR_1.into()),
+            Ok(Cursor::new(INPUT_STREAM_2)),
+            Ok(Cursor::new(INPUT_STREAM_3)),
+        ];
+        let mut out = Vec::<u8>::default();
+        cat(ins, &mut out, true, false)?;
+
+        let (lines_1, lines_2, lines_3) = (
+            INPUT_STREAM_1.lines().collect::<Vec<_>>(),
+            INPUT_STREAM_2.lines().collect::<Vec<_>>(),
+            INPUT_STREAM_3.lines().collect::<Vec<_>>(),
+        );
+
+        let expected_out = vec![
+            format!(
+                "{PRE_LINE_NUM_INDENT}1{POST_LINE_NUM_INDENT}{}\n",
+                lines_1[0]
+            ),
+            format!(
+                "{PRE_LINE_NUM_INDENT}2{POST_LINE_NUM_INDENT}{}\n",
+                lines_1[1]
+            ),
+            format!(
+                "{PRE_LINE_NUM_INDENT}3{POST_LINE_NUM_INDENT}{}cat: {ERROR_1}\n",
+                lines_1[2]
+            ),
+            format!(
+                "{PRE_LINE_NUM_INDENT}4{POST_LINE_NUM_INDENT}{}\n",
+                lines_2[0]
+            ),
+            format!(
+                "{PRE_LINE_NUM_INDENT}5{POST_LINE_NUM_INDENT}{}\n",
+                lines_2[1]
+            ),
+            format!(
+                "{PRE_LINE_NUM_INDENT}6{POST_LINE_NUM_INDENT}{}\n",
+                lines_2[2]
+            ),
+            format!(
+                "{PRE_LINE_NUM_INDENT}7{POST_LINE_NUM_INDENT}{}\n",
+                lines_3[0]
+            ),
+            format!(
+                "{PRE_LINE_NUM_INDENT}8{POST_LINE_NUM_INDENT}{}\n",
+                lines_3[1]
+            ),
+            format!("{PRE_LINE_NUM_INDENT}9{POST_LINE_NUM_INDENT}{}", lines_3[2]),
+        ];
+
+        assert_eq!(str::from_utf8(&out).unwrap(), expected_out.join(""));
+        Ok(())
+    }
+
+    #[test]
+    fn line_ends_correct_out() -> io::Result<()> {
+        let ins = vec![
+            Ok(Cursor::new(INPUT_STREAM_1)),
+            Ok(Cursor::new(INPUT_STREAM_2)),
+            Ok(Cursor::new(INPUT_STREAM_3)),
+        ];
+        let mut out = Vec::<u8>::default();
+        cat(ins, &mut out, false, true)?;
+
+        let (lines_1, lines_2, lines_3) = (
+            INPUT_STREAM_1.lines().collect::<Vec<_>>(),
+            INPUT_STREAM_2.lines().collect::<Vec<_>>(),
+            INPUT_STREAM_3.lines().collect::<Vec<_>>(),
+        );
+
+        let expected_out = vec![
+            format!("{}$\n", lines_1[0]),
+            format!("{}$\n", lines_1[1]),
+            format!("{}{}$\n", lines_1[2], lines_2[0]),
+            format!("{}$\n", lines_2[1]),
+            format!("{}$\n", lines_2[2]),
+            format!("{}$\n", lines_3[0]),
+            format!("{}$\n", lines_3[1]),
+            format!("{}", lines_3[2]),
+        ];
+
+        assert_eq!(str::from_utf8(&out).unwrap(), expected_out.join(""));
+        Ok(())
+    }
+
+    #[test]
+    fn line_ends_with_error_correct_out() -> io::Result<()> {
+        let ins = vec![
+            Ok(Cursor::new(INPUT_STREAM_1)),
+            Err(ERROR_1.into()),
+            Ok(Cursor::new(INPUT_STREAM_2)),
+            Ok(Cursor::new(INPUT_STREAM_3)),
+        ];
+        let mut out = Vec::<u8>::default();
+        cat(ins, &mut out, false, true)?;
+
+        let (lines_1, lines_2, lines_3) = (
+            INPUT_STREAM_1.lines().collect::<Vec<_>>(),
+            INPUT_STREAM_2.lines().collect::<Vec<_>>(),
+            INPUT_STREAM_3.lines().collect::<Vec<_>>(),
+        );
+
+        let expected_out = vec![
+            format!("{}$\n", lines_1[0]),
+            format!("{}$\n", lines_1[1]),
+            format!("{}cat: {ERROR_1}\n", lines_1[2]),
+            format!("{}$\n", lines_2[0]),
+            format!("{}$\n", lines_2[1]),
+            format!("{}$\n", lines_2[2]),
+            format!("{}$\n", lines_3[0]),
+            format!("{}$\n", lines_3[1]),
+            format!("{}", lines_3[2]),
+        ];
+
+        assert_eq!(str::from_utf8(&out).unwrap(), expected_out.join(""));
+        Ok(())
+    }
+
+    #[test]
+    fn line_nums_and_ends_correct_out() -> io::Result<()> {
+        let ins = vec![
+            Ok(Cursor::new(INPUT_STREAM_1)),
+            Ok(Cursor::new(INPUT_STREAM_2)),
+            Ok(Cursor::new(INPUT_STREAM_3)),
+        ];
+        let mut out = Vec::<u8>::default();
+        cat(ins, &mut out, true, true)?;
+
+        let (lines_1, lines_2, lines_3) = (
+            INPUT_STREAM_1.lines().collect::<Vec<_>>(),
+            INPUT_STREAM_2.lines().collect::<Vec<_>>(),
+            INPUT_STREAM_3.lines().collect::<Vec<_>>(),
+        );
+
+        let expected_out = vec![
+            format!(
+                "{PRE_LINE_NUM_INDENT}1{POST_LINE_NUM_INDENT}{}$\n",
+                lines_1[0]
+            ),
+            format!(
+                "{PRE_LINE_NUM_INDENT}2{POST_LINE_NUM_INDENT}{}$\n",
+                lines_1[1]
+            ),
+            format!(
+                "{PRE_LINE_NUM_INDENT}3{POST_LINE_NUM_INDENT}{}{}$\n",
+                lines_1[2], lines_2[0]
+            ),
+            format!(
+                "{PRE_LINE_NUM_INDENT}4{POST_LINE_NUM_INDENT}{}$\n",
+                lines_2[1]
+            ),
+            format!(
+                "{PRE_LINE_NUM_INDENT}5{POST_LINE_NUM_INDENT}{}$\n",
+                lines_2[2]
+            ),
+            format!(
+                "{PRE_LINE_NUM_INDENT}6{POST_LINE_NUM_INDENT}{}$\n",
+                lines_3[0]
+            ),
+            format!(
+                "{PRE_LINE_NUM_INDENT}7{POST_LINE_NUM_INDENT}{}$\n",
+                lines_3[1]
+            ),
+            format!("{PRE_LINE_NUM_INDENT}8{POST_LINE_NUM_INDENT}{}", lines_3[2]),
+        ];
+
+        assert_eq!(str::from_utf8(&out).unwrap(), expected_out.join(""));
+        Ok(())
+    }
+
+    #[test]
+    fn line_nums_and_ends_with_error_correct_out() -> io::Result<()> {
+        let ins = vec![
+            Ok(Cursor::new(INPUT_STREAM_1)),
+            Err(ERROR_1.into()),
+            Ok(Cursor::new(INPUT_STREAM_2)),
+            Ok(Cursor::new(INPUT_STREAM_3)),
+        ];
+        let mut out = Vec::<u8>::default();
+        cat(ins, &mut out, true, true)?;
+
+        let (lines_1, lines_2, lines_3) = (
+            INPUT_STREAM_1.lines().collect::<Vec<_>>(),
+            INPUT_STREAM_2.lines().collect::<Vec<_>>(),
+            INPUT_STREAM_3.lines().collect::<Vec<_>>(),
+        );
+
+        let expected_out = vec![
+            format!(
+                "{PRE_LINE_NUM_INDENT}1{POST_LINE_NUM_INDENT}{}$\n",
+                lines_1[0]
+            ),
+            format!(
+                "{PRE_LINE_NUM_INDENT}2{POST_LINE_NUM_INDENT}{}$\n",
+                lines_1[1]
+            ),
+            format!(
+                "{PRE_LINE_NUM_INDENT}3{POST_LINE_NUM_INDENT}{}cat: {ERROR_1}\n",
+                lines_1[2]
+            ),
+            format!(
+                "{PRE_LINE_NUM_INDENT}4{POST_LINE_NUM_INDENT}{}$\n",
+                lines_2[0]
+            ),
+            format!(
+                "{PRE_LINE_NUM_INDENT}5{POST_LINE_NUM_INDENT}{}$\n",
+                lines_2[1]
+            ),
+            format!(
+                "{PRE_LINE_NUM_INDENT}6{POST_LINE_NUM_INDENT}{}$\n",
+                lines_2[2]
+            ),
+            format!(
+                "{PRE_LINE_NUM_INDENT}7{POST_LINE_NUM_INDENT}{}$\n",
+                lines_3[0]
+            ),
+            format!(
+                "{PRE_LINE_NUM_INDENT}8{POST_LINE_NUM_INDENT}{}$\n",
+                lines_3[1]
+            ),
+            format!("{PRE_LINE_NUM_INDENT}9{POST_LINE_NUM_INDENT}{}", lines_3[2]),
+        ];
+
+        assert_eq!(str::from_utf8(&out).unwrap(), expected_out.join(""));
+        Ok(())
+    }
 }
