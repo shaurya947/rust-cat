@@ -1,7 +1,29 @@
-use std::io::{stdout, BufRead, BufWriter, Result, Write};
+use std::{
+    error::Error,
+    fs,
+    io::{self, BufRead, BufReader, BufWriter, Write},
+    writeln,
+};
+
+pub enum InputSource {
+    StdIn,
+    File(String),
+}
+
+impl InputSource {
+    fn get_buf_read(self) -> Result<Box<dyn BufRead>, Box<dyn Error>> {
+        use InputSource::*;
+        match self {
+            StdIn => Ok(Box::new(io::stdin().lock())),
+            File(path) => Ok(Box::new(BufReader::new(
+                fs::File::open(&path).map_err(|e| format!("{path}: {e}"))?,
+            ))),
+        }
+    }
+}
 
 pub struct Concatenator {
-    inputs: Vec<Box<dyn BufRead>>,
+    inputs: Vec<InputSource>,
     add_line_numbers: bool,
     add_line_endings: bool,
 }
@@ -12,8 +34,14 @@ enum BufReadState {
     MiddleOfLine,
 }
 
+// When printing line numbers:
+// - indent 5 spaces before the number
+// - indent with tab after the number
+pub const PRE_LINE_NUM_INDENT: &str = "     ";
+pub const POST_LINE_NUM_INDENT: &str = "\t";
+
 impl Concatenator {
-    pub fn new(inputs: Vec<Box<dyn BufRead>>) -> Concatenator {
+    pub fn new(inputs: Vec<InputSource>) -> Concatenator {
         Concatenator {
             inputs,
             add_line_numbers: false,
@@ -31,11 +59,20 @@ impl Concatenator {
         self
     }
 
-    pub fn concatenate(self) -> Result<()> {
+    pub fn concatenate(self) -> io::Result<()> {
         use BufReadState::*;
+
         let mut line_count = 1;
-        let mut output_stream = BufWriter::new(stdout().lock());
-        for mut input in self.inputs {
+        let mut output_stream = BufWriter::new(io::stdout().lock());
+        'outer: for input in self.inputs {
+            let input = input.get_buf_read();
+            if let Err(e) = input {
+                writeln!(output_stream, "cat: {e}")?;
+                output_stream.flush()?;
+                continue 'outer;
+            }
+            let mut input = input.unwrap();
+
             let mut buf_read_state = StartOfLine;
             'inner: loop {
                 let input_buffer = input.fill_buf()?;
@@ -47,7 +84,10 @@ impl Concatenator {
 
                 // Add line numbers if configured, if we're at the start of a line
                 if buf_read_state == StartOfLine && self.add_line_numbers {
-                    write!(output_stream, "     {line_count}\t")?;
+                    write!(
+                        output_stream,
+                        "{PRE_LINE_NUM_INDENT}{line_count}{POST_LINE_NUM_INDENT}"
+                    )?;
                     line_count += 1;
                 }
 
@@ -69,6 +109,10 @@ impl Concatenator {
                     writeln!(output_stream)?;
                     bytes_written += 1;
                 } else {
+                    /*
+                    It's ok to set buf_read_state to MiddleOfLine even if we hit
+                    EOF because once we hit EOF the inner loop breaks anyway.
+                    */
                     buf_read_state = MiddleOfLine;
                 }
 
