@@ -1,5 +1,5 @@
 use clap::Parser;
-use exercise_3_cat::{Concatenator, InputSource};
+use cat::{Concatenator, InputSource};
 
 const ABOUT: &str = r"
 Concatenate FILE(s) to standard output.
